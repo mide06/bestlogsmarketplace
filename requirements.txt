@@ -5,3 +5,4 @@ gunicorn>=22.0,<23.0
 whitenoise>=6.7,<7.0
 django-admin-sortable2>=2.3.1
 django-chartjs>=2.3.0
+requests>=2.32.0
