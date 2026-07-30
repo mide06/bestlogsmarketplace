@@ -1,0 +1,18 @@
+# Local env file (keep secrets out of VCS)
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# SQLite DB
+db.sqlite3
+
+# Virtual environment
+venv/
+.venv/
+
+# Static and media build output
+staticfiles/
+media/

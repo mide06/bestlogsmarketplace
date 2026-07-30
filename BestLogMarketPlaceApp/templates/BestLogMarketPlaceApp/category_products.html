@@ -31,6 +31,12 @@
             </span>
         </h1>
     </div>
+    {# Show category description once above products if present #}
+    {% if category.description %}
+    <div class="category-description">
+        <p>{{ category.description }}</p>
+    </div>
+    {% endif %}
 
     {% if products %}
         {% for product in products %}
@@ -45,18 +51,56 @@
                 <div class="product-info">
                     <h3 class="product-title">{{ product.name }}</h3>
                     <p class="product-price" style="font-size:15px;">₦{{ product.price }}</p>
+                    {% if product.description %}
+                        <p class="product-description" style="font-size:12px;">{{ product.description|truncatechars:120 }}</p>
+                    {% endif %}
+                    <p class="product-availability" style="font-size:14px;">
+                        {% if product.supplier_stock %}
+                            {% if product.supplier_stock > 0 %}
+                                Available: <strong>{{ product.supplier_stock }}</strong>
+                            {% else %}
+                                <span class="text-danger">Out of stock</span>
+                            {% endif %}
+                        {% else %}
+                            {% if product.is_active %}
+                                Available
+                            {% else %}
+                                <span class="text-danger">Out of stock</span>
+                            {% endif %}
+                        {% endif %}
+                    </p>
                     {% if product.view_link %}
                     <a href="{{ product.view_link }}" target="_blank" style="font-size:8px;" class="view-product-btn">
                         <i class="fas fa-eye"></i>
                         View
                     </a>
                     {% endif %}
-                    {% if product.id not in cart_product_ids %}
-                    <a href="{% url 'add_to_cart' product.id %}" style="font-size:8px;" class="purchase-btn">
-                        <i class="fas fa-cart-plus"></i> Select
+                    <a href="{% url 'product_detail' product.id %}" style="font-size:8px;" class="view-product-btn">
+                        <i class="fas fa-info-circle"></i>
+                        View Details
                     </a>
+                    {% if product.id not in cart_product_ids %}
+                        <form method="post" action="{% url 'add_to_cart' product.id %}" style="display:inline-block;">
+                            {% csrf_token %}
+                            <button type="submit" class="purchase-btn" style="font-size:8px;"><i class="fas fa-cart-plus"></i> Select</button>
+                        </form>
                     {% else %}
-                    <span style="color: green;">Added to Cart</span>
+                        {# show quantity controls for the cart item matching this product #}
+                        {% for ci in cart.items.all %}
+                            {% if ci.product.id == product.id %}
+                                <div style="display:flex;gap:6px;align-items:center;">
+                                    <form method="post" action="{% url 'update_cart' ci.id %}" style="display:inline-flex;gap:6px;align-items:center;">
+                                        {% csrf_token %}
+                                        <input type="number" name="quantity" value="{{ ci.quantity }}" min="1" max="{{ product.supplier_stock }}" style="width:64px;" />
+                                        <button type="submit" class="btn btn-sm">Update</button>
+                                    </form>
+                                    <form method="post" action="{% url 'add_to_cart' product.id %}" style="display:inline-block;">
+                                        {% csrf_token %}
+                                        <button type="submit" class="btn btn-sm">+</button>
+                                    </form>
+                                </div>
+                            {% endif %}
+                        {% endfor %}
                     {% endif %}
                 </div>
                 <div class="background-shape"></div>

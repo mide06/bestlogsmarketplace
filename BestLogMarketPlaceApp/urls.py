@@ -17,9 +17,15 @@ urlpatterns = [
     path('pending',views.pending, name = "pending"),
     path('payment_history',views.payment_history, name = "payment_history"),
     path('orders',views.orders, name = "orders"),
+    path('custom-admin/transactions/', views.custom_admin_transactions, name='custom_admin_transactions'),
+    path('custom-admin/products/', views.custom_admin_products, name='custom_admin_products'),
+    path('custom-admin/users/', views.custom_admin_users, name='custom_admin_users'),
+    path('custom-admin', views.custom_admin_dashboard, name='custom_admin_dashboard'),
     path('order_detail/<str:product_id>/',views.order_detail, name = "order_detail"),
     path('add_to_cart/<int:product_id>/', views.add_to_cart, name='add_to_cart'),
+    path('product/<int:product_id>/', views.product_detail, name='product_detail'),
     path('view_cart/', views.view_cart, name='view_cart'),
+    path('update_cart/<int:item_id>/', views.update_cart, name='update_cart'),
     path('remove_from_cart/<int:item_id>/', views.remove_from_cart, name='remove_from_cart'),
     path('category/<int:category_id>/products/', views.category_products_view, name='category_products'),
     path('privacy_page/', views.privacy_page, name='privacy_page'),
@@ -29,6 +35,5 @@ urlpatterns = [
     path('password_reset/done/', auth_views.PasswordResetDoneView.as_view(template_name='BestLogMarketPlaceApp/password_reset_done.html'), name='password_reset_done'),
     path('reset/<uidb64>/<token>/', auth_views.PasswordResetConfirmView.as_view(template_name='BestLogMarketPlaceApp/password_reset_confirm.html'), name='password_reset_confirm'),
     path('reset/done/', auth_views.PasswordResetCompleteView.as_view(template_name='BestLogMarketPlaceApp/password_reset_complete.html'), name='password_reset_complete'),
-
-
  ]
+

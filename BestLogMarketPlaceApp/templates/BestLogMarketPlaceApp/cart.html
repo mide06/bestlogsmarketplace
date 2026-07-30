@@ -15,7 +15,12 @@
                         <div class="ms-1">
                             <h5 style="font-size:11px;">{{ item.product.name }}</h5>
                             <p>Price: ₦{{ item.product.price }}</p>
-                            <p>Quantity: {{ item.quantity }}</p>
+                            <form method="post" action="{% url 'update_cart' item.id %}" style="display:flex; gap:8px; align-items:center;">
+                                {% csrf_token %}
+                                <label style="margin:0;">Quantity:</label>
+                                <input type="number" name="quantity" value="{{ item.quantity }}" min="1" max="{{ item.product.supplier_stock }}" style="width:70px;" />
+                                <button type="submit" class="btn btn-primary btn-sm">Update</button>
+                            </form>
                         </div>
                     </div>
                     <div >

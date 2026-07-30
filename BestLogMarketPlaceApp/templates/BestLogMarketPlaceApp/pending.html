@@ -57,12 +57,23 @@
 <body>
     <div class="container">
         {% if transaction_status == 'approved' %}
-        <h1>Payment {{payment_status}} 🎉</h1>
-        <p>Your payment is has been {{payment_status}} and details sent to your email </p> </b>
-        <p style="color:red;" >please check spam folder, if you dont find product detail in email inbox </p>
+        <h1>Payment Approved 🎉</h1>
+        {% if transaction.delivery_status == 'delivered' and transaction.delivered_keys %}
+        <p>Your Product</p>
+        <div style="text-align:left; margin-top:20px;">
+            {% for key in transaction.delivered_keys %}
+            <p><strong>{{ key }}</strong></p>
+            {% endfor %}
+        </div>
+        <p>Details were also sent to your email address.</p>
+        {% elif transaction.delivery_status == 'pending_supplier_delivery' %}
+        <p>Your payment has been received, but supplier delivery is still pending. Please check your order page later.</p>
+        {% else %}
+        <p>Your payment has been approved and details sent to your email.</p>
+        {% endif %}
         <div class="button-container">
             <a href="{% url 'home' %}" class="button">Back to Home</a>
-            <a href="https://mail.google.com/" class="button">View Order in Mail</a>
+            <a href="{% url 'orders' %}" class="button">View Order</a>
         </div>
         {% else %}
         <h1>Payment {{payment_status}} </h1>

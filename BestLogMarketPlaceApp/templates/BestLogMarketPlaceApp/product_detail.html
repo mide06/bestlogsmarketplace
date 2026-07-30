@@ -1,0 +1,34 @@
+{% extends "BestLogMarketPlaceApp/base.html" %}
+{% load static %}
+{% block content %}
+
+<div class="product-detail">
+    <div class="product-header">
+        <h1>{{ product.name }}</h1>
+        <p class="product-price">₦{{ product.price }}</p>
+        <p class="product-availability">{% if product.supplier_stock and product.supplier_stock > 0 %}Available: <strong>{{ product.supplier_stock }}</strong>{% else %}{% if product.is_active %}Available{% else %}<span class="text-danger">Out of stock</span>{% endif %}{% endif %}</p>
+    </div>
+
+    <div class="product-body">
+        <h3>Description</h3>
+        {% if product.description %}
+            <div class="product-description">{{ product.description|linebreaksbr }}</div>
+        {% else %}
+            <div class="product-description text-muted">No description provided.</div>
+        {% endif %}
+
+        <div style="margin-top:1em;">
+            <form method="post" action="{% url 'add_to_cart' product.id %}">
+                {% csrf_token %}
+                <button type="submit" class="purchase-btn">Add to Cart</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<style>
+.product-description { white-space: pre-wrap; font-size:14px; line-height:1.4; }
+.product-header { margin-bottom: 1em; }
+</style>
+
+{% endblock content %}

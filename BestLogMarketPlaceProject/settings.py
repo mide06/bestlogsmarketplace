@@ -10,25 +10,58 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.0/ref/settings/
 """
 
+import os
+import urllib.parse
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def load_env_file():
+    env_file = BASE_DIR / '.env'
+    if not env_file.exists():
+        return
+
+    for line in env_file.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+load_env_file()
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-=knc83m!2d&9petipjo4jdq#01a4cg0vrn5&c5_lu6g@ih1vsm'
+DEBUG = os.getenv('DEBUG', 'False').lower() in {'1', 'true', 'yes', 'on'}
+SECRET_KEY = os.getenv('SECRET_KEY')
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-=knc83m!2d&9petipjo4jdq#01a4cg0vrn5&c5_lu6g@ih1vsm'
+    else:
+        raise RuntimeError('SECRET_KEY environment variable is required when DEBUG=False')
 
-ALLOWED_HOSTS = ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0624-102-91-93-171.ngrok-free.app','*']
-CSRF_TRUSTED_ORIGINS = ['https://0624-102-91-93-171.ngrok-free.app']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+render_host = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+if render_host:
+    ALLOWED_HOSTS.append(render_host)
 
+CSRF_TRUSTED_ORIGINS = [os.getenv('CSRF_TRUSTED_ORIGIN', 'https://e325-105-112-215-94.ngrok-free.app')]
+if render_host:
+    CSRF_TRUSTED_ORIGINS.append(f'https://{render_host}')
 
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
 
 
 # Application definition
@@ -40,12 +73,15 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'whitenoise.runserver_nostatic',
     'BestLogMarketPlaceApp',
     'adminsortable2',
+    'chartjs',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -79,12 +115,47 @@ WSGI_APPLICATION = 'BestLogMarketPlaceProject.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+DB_NAME = os.getenv('DB_NAME')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_PORT = os.getenv('DB_PORT', '5432')
+
+DATABASE_URL = os.getenv('DATABASE_URL')
+if DATABASE_URL:
+    parsed_url = urllib.parse.urlparse(DATABASE_URL)
+    DB_NAME = parsed_url.path.lstrip('/') or DB_NAME
+    DB_USER = parsed_url.username or DB_USER
+    DB_PASSWORD = parsed_url.password or DB_PASSWORD
+    DB_HOST = parsed_url.hostname or DB_HOST
+    DB_PORT = str(parsed_url.port or DB_PORT)
+
+if DB_NAME and DB_USER and DB_PASSWORD:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': DB_NAME,
+            'USER': DB_USER,
+            'PASSWORD': DB_PASSWORD,
+            'HOST': DB_HOST,
+            'PORT': DB_PORT,
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
+
+# Existing SQLite configuration kept as a reference:
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
 
 
 # Password validation
@@ -121,15 +192,12 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [BASE_DIR / 'static']
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-import os
-
-STATIC_URL = 'static/'
-STATIC_FILES_DIR = os.path.join(BASE_DIR, 'static')
-STATIC_ROOT = os.path.join(BASE_DIR, 'static')
-
-
-MEDIA_URL = 'img/'
+MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
@@ -143,12 +211,19 @@ AUTH_USER_MODEL = 'BestLogMarketPlaceApp.CustomUser'
 
 # Email Backend (for development)
 
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 
 # If you want to use an SMTP server (like Gmail), configure it like this:
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'bestlogsmarketplace@gmail.com'
-EMAIL_HOST_PASSWORD = 'lfsqgiblnvrdrhym'
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in {'1', 'true', 'yes', 'on'}
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'bestlogsmarketplace@gmail.com')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+
+CREDO_PUBLIC_KEY = os.getenv('CREDO_PUBLIC_KEY', '')
+CREDO_SECRET_KEY = os.getenv('CREDO_SECRET_KEY', '')
+CREDO_BASE_URL = os.getenv('CREDO_BASE_URL', 'https://api.credocentral.com')
+CREDO_CALLBACK_URL = os.getenv('CREDO_CALLBACK_URL', 'http://www.bestlogsmarketplace.com.ng/pending')
+
+EMON_API_KEY = os.getenv('EMON_API_KEY', '')
+EMON_BASE_URL = os.getenv('EMON_BASE_URL', 'https://emonbestlog.com/api/v1')

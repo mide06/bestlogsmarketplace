@@ -143,9 +143,46 @@
                 </div>
                 <div class="order-detail">
                     <p><strong><i>Details:( {{product.name}} ) </i></strong><br></p>
+                    {# Show category description if present, but do not overwrite product account details #}
+                    {% if product.category and product.category.description %}
+                    <div style="margin-top:10px;">
+                        <p>{{ product.category.description|linebreaks }}</p>
+                    </div>
+                    {% endif %}
                     <div style="margin-top:10px;">
                         <p>{{ product.account_details|linebreaks }}</p>
                     </div>
+                    <div style="margin-top:10px;">
+                        <p><strong>Availability:</strong>
+                        {% if product.supplier_stock %}
+                            {% if product.supplier_stock > 0 %}
+                                {{ product.supplier_stock }} available
+                            {% else %}
+                                <span class="text-danger">Out of stock</span>
+                            {% endif %}
+                        {% else %}
+                            {% if product.is_active %}
+                                Available
+                            {% else %}
+                                <span class="text-danger">Out of stock</span>
+                            {% endif %}
+                        {% endif %}
+                        </p>
+                    </div>
+                    {% if transaction %}
+                    <div style="margin-top:10px;">
+                        <p><strong>Order Status:</strong> {{ transaction.delivery_status|default:'pending' }}</p>
+                        <p><strong>Supplier Order ID:</strong> {{ transaction.supplier_order_id|default:'N/A' }}</p>
+                        <p><strong>Delivered Keys:</strong></p>
+                        {% if delivered_keys %}
+                            {% for key in delivered_keys %}
+                            <p>{{ key }}</p>
+                            {% endfor %}
+                        {% else %}
+                            <p>No keys delivered yet.</p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
                 </div>
 
             </div>
