@@ -49,14 +49,24 @@ if not SECRET_KEY:
     else:
         raise RuntimeError('SECRET_KEY environment variable is required when DEBUG=False')
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+]
+
 render_host = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 if render_host:
     ALLOWED_HOSTS.append(render_host)
 
-CSRF_TRUSTED_ORIGINS = [os.getenv('CSRF_TRUSTED_ORIGIN', 'https://e325-105-112-215-94.ngrok-free.app')]
+CSRF_TRUSTED_ORIGINS = []
+
+render_host = os.getenv('RENDER_EXTERNAL_HOSTNAME')
 if render_host:
     CSRF_TRUSTED_ORIGINS.append(f'https://{render_host}')
+
+custom_origin = os.getenv('CSRF_TRUSTED_ORIGIN')
+if custom_origin:
+    CSRF_TRUSTED_ORIGINS.append(custom_origin)
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_SSL_REDIRECT = not DEBUG
