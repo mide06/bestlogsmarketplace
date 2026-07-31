@@ -16,3 +16,9 @@ venv/
 # Static and media build output
 staticfiles/
 media/
+
+# Temporary migration artifacts
+data.json
+*.bak
+db.sqlite3.*.bak
+.tmp_imports/

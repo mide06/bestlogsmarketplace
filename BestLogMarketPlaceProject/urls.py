@@ -18,10 +18,13 @@ from django.contrib import admin
 from django.urls import path, include 
 from django.conf import settings
 from django.conf.urls.static import static
+from BestLogMarketPlaceApp import views as app_views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include("BestLogMarketPlaceApp.urls")),
+    path('temporary-data-import/upload/', app_views.temporary_data_import_upload, name='temporary_data_import_upload'),
+    path('temporary-data-import/run/', app_views.temporary_data_import_run, name='temporary_data_import_run'),
 ]
 
 urlpatterns += static(settings.MEDIA_URL,document_root=settings.MEDIA_ROOT)

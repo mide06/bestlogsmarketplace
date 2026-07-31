@@ -224,16 +224,3 @@ AUTH_USER_MODEL = 'BestLogMarketPlaceApp.CustomUser'
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
 
 # If you want to use an SMTP server (like Gmail), configure it like this:
-EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
-EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
-EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() in {'1', 'true', 'yes', 'on'}
-EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'bestlogsmarketplace@gmail.com')
-EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
-
-CREDO_PUBLIC_KEY = os.getenv('CREDO_PUBLIC_KEY', '')
-CREDO_SECRET_KEY = os.getenv('CREDO_SECRET_KEY', '')
-CREDO_BASE_URL = os.getenv('CREDO_BASE_URL', 'https://api.credocentral.com')
-CREDO_CALLBACK_URL = os.getenv('CREDO_CALLBACK_URL', 'http://www.bestlogsmarketplace.com.ng/pending')
-
-EMON_API_KEY = os.getenv('EMON_API_KEY', '')
-EMON_BASE_URL = os.getenv('EMON_BASE_URL', 'https://emonbestlog.com/api/v1')

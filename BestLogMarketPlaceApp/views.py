@@ -1,5 +1,9 @@
+import hashlib
+import hmac
 import json
 import logging
+import os
+from pathlib import Path
 
 from django.shortcuts import get_object_or_404, redirect, render
 from django.contrib.auth import authenticate, login, logout
@@ -7,7 +11,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib import messages
 from .forms import RegisterForm,ProfileForm
-from .models import Category, Product,Transaction,BankPaymentDetail,Cart, CartItem, CustomUser
+from .models import Category, Product,Transaction,BankPaymentDetail,Cart, CartItem, CustomUser, DataImportMarker
 from django.db.models import Sum
 from django.db.models import Count, Q
 from django.contrib.sessions.models import Session
@@ -15,13 +19,82 @@ from django.core.mail import send_mail
 from django.template.loader import render_to_string
 import requests
 from django.conf import settings
+from django.core.management import call_command
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 
 from .services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
 from .models import SupplierProduct
 from django.db import transaction as db_transaction
 
 logger = logging.getLogger(__name__)
-# Create your views here.
+TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
+TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
+MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
+
+
+# TEMPORARY DATA MIGRATION ENDPOINT - REMOVE AFTER SUCCESSFUL IMPORT
+
+def _require_data_import_token(request):
+    token = os.getenv('DATA_IMPORT_TOKEN')
+    if not token:
+        return None, JsonResponse({'detail': 'Data import token is not configured.'}, status=503)
+
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None, JsonResponse({'detail': 'Missing bearer token.'}, status=403)
+
+    provided_token = auth_header[len('Bearer '):].strip()
+    if not hmac.compare_digest(provided_token, token):
+        return None, JsonResponse({'detail': 'Invalid token.'}, status=403)
+
+    return token, None
+
+
+@csrf_exempt
+@require_POST
+def temporary_data_import_upload(request):
+    token, error_response = _require_data_import_token(request)
+    if error_response is not None:
+        return error_response
+
+    uploaded_file = request.FILES.get('file')
+    if uploaded_file is None or uploaded_file.name != 'data.json':
+        return JsonResponse({'detail': 'Please upload a file named data.json.'}, status=400)
+
+    if uploaded_file.size > MAX_IMPORT_FILE_SIZE:
+        return JsonResponse({'detail': 'Uploaded file exceeds the maximum supported size.'}, status=413)
+
+    upload_path = TEMP_IMPORT_DIR / 'data.json'
+    with upload_path.open('wb') as handle:
+        for chunk in uploaded_file.chunks():
+            handle.write(chunk)
+
+    return JsonResponse({'detail': 'Upload complete.', 'stored_at': str(upload_path)})
+
+
+@csrf_exempt
+@require_POST
+def temporary_data_import_run(request):
+    token, error_response = _require_data_import_token(request)
+    if error_response is not None:
+        return error_response
+
+    if DataImportMarker.objects.filter(name='sqlite_to_postgres').exists():
+        return JsonResponse({'detail': 'Data import has already been completed.'}, status=200)
+
+    upload_path = TEMP_IMPORT_DIR / 'data.json'
+    if not upload_path.exists():
+        return JsonResponse({'detail': 'No uploaded data.json was found.'}, status=404)
+
+    try:
+        call_command('import_sqlite_data', input_file=str(upload_path), verbosity=1)
+    except Exception as exc:
+        logger.exception('Temporary data import failed')
+        return JsonResponse({'detail': f'Import failed: {exc}'}, status=400)
+
+    return JsonResponse({'detail': 'Data import completed successfully.'}, status=200)
 
 
 def maintain(request):

@@ -37,7 +37,7 @@ class Category(models.Model):
 class Product(models.Model):
     name = models.CharField(max_length=100, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    description = models.TextField(blank=True, default="")
+    description = models.TextField(blank=True, default="", null=True)
     view_link = models.URLField(max_length=300, blank=True, null=True)
     category = models.ForeignKey("Category", on_delete=models.CASCADE, related_name="products")
     account_details = models.TextField(blank=True, null=True)
@@ -224,4 +224,16 @@ class CartItem(models.Model):
 
     def total_price(self):
         return self.product.price * self.quantity
+
+
+class DataImportMarker(models.Model):
+    """Tracks whether the temporary SQLite-to-PostgreSQL import has already completed."""
+    name = models.CharField(max_length=100, unique=True, default="sqlite_to_postgres")
+    imported_at = models.DateTimeField(auto_now_add=True)
+    source_file = models.CharField(max_length=255, blank=True, null=True)
+    total_objects = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "Data Import Marker"
+        verbose_name_plural = "Data Import Markers"
 
