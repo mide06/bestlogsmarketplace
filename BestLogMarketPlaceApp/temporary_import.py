@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -27,8 +28,10 @@ DEFAULT_TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
 TEMP_IMPORT_DIR = Path(os.getenv('DATA_IMPORT_DIR', str(DEFAULT_TEMP_IMPORT_DIR))).expanduser().resolve()
 UPLOAD_FILE = (TEMP_IMPORT_DIR / 'data.json').resolve()
 PROGRESS_FILE = (TEMP_IMPORT_DIR / 'import_progress.json').resolve()
+CHUNK_DIR = (TEMP_IMPORT_DIR / 'chunks').resolve()
 BATCH_SIZE_DEFAULT = 200
 MAX_BATCH_SIZE = 500
+CHUNK_NAME_PATTERN = re.compile(r'^(users|categories|products|supplier_products|bank_payment_details|transactions|carts|cart_items)-\d{4,}\.json$')
 
 IMPORT_STAGES = [
     ('users', ['BestLogMarketPlaceApp.customuser']),
@@ -70,6 +73,7 @@ class ImportErrorDetail(Exception):
 
 def ensure_temp_import_dir():
     TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
+    CHUNK_DIR.mkdir(exist_ok=True, parents=True)
 
 
 ensure_temp_import_dir()
@@ -113,6 +117,83 @@ def stream_json_objects(file_path):
     with open(file_path, 'r', encoding='utf-8') as handle:
         for item in ijson.items(handle, 'item'):
             yield item
+
+
+def stage_for_chunk_name(chunk_name):
+    if not CHUNK_NAME_PATTERN.fullmatch(chunk_name):
+        raise ImportErrorDetail('Invalid chunk name. Use a generated stage-NNNN.json name.')
+    return chunk_name.rsplit('-', 1)[0]
+
+
+def validate_chunk_file(file_path, stage_name):
+    expected_labels = dict(IMPORT_STAGES)[stage_name]
+    total_objects = 0
+    for index, entry in enumerate(stream_json_objects(file_path), start=1):
+        if not isinstance(entry, dict):
+            raise ImportErrorDetail(f'Chunk entry {index} is not a JSON object.')
+        if entry.get('model') not in expected_labels:
+            raise ImportErrorDetail(
+                f'Chunk entry {index} has model {entry.get("model")!r}; expected {expected_labels}.'
+            )
+        if 'pk' not in entry or 'fields' not in entry or not isinstance(entry['fields'], dict):
+            raise ImportErrorDetail(f'Chunk entry {index} is missing pk or fields.')
+        total_objects += 1
+    return total_objects
+
+
+def initialize_chunk_progress():
+    return {
+        'mode': 'chunks',
+        'data_file': str(CHUNK_DIR),
+        'uploaded_at': datetime.utcnow().isoformat() + 'Z',
+        'status': 'uploaded',
+        'total_file_objects': 0,
+        'total_importable': 0,
+        'stage_index': 0,
+        'stage_name': IMPORT_STAGES[0][0],
+        'current_chunk': None,
+        'current_chunk_index': 0,
+        'chunk_object_offset': 0,
+        'batch_number': 0,
+        'processed': 0,
+        'successful': 0,
+        'skipped': 0,
+        'failed': 0,
+        'failed_objects': [],
+        'last_error': None,
+        'chunks': {},
+        'stage_complete': {},
+        'completed_at': None,
+    }
+
+
+def register_chunk(chunk_name, stage_name, file_path, object_count):
+    progress = load_progress()
+    if progress is None or progress.get('mode') != 'chunks':
+        progress = initialize_chunk_progress()
+    record = progress['chunks'].get(chunk_name, {})
+    progress['chunks'][chunk_name] = {
+        'stage': stage_name,
+        'path': str(file_path),
+        'size': file_path.stat().st_size,
+        'objects': object_count,
+        'uploaded_at': record.get('uploaded_at', datetime.utcnow().isoformat() + 'Z'),
+    }
+    progress['total_file_objects'] = sum(item['objects'] for item in progress['chunks'].values())
+    progress['total_importable'] = progress['total_file_objects']
+    save_progress(progress)
+    logger.info('Temporary import chunk registered: path=%s stage=%s objects=%s size=%s', file_path, stage_name, object_count, file_path.stat().st_size)
+    return progress
+
+
+def mark_stage_complete(stage_name):
+    progress = load_progress()
+    if not progress or progress.get('mode') != 'chunks':
+        raise ImportErrorDetail('No chunk upload state exists.')
+    progress['stage_complete'][stage_name] = True
+    save_progress(progress)
+    logger.info('Temporary import stage upload complete: stage=%s chunks=%s', stage_name, sum(1 for item in progress['chunks'].values() if item['stage'] == stage_name))
+    return progress
 
 
 def count_file_objects(file_path):
@@ -239,6 +320,15 @@ def get_status():
             'failed': 0,
         }
     status = status.copy()
+    if status.get('mode') == 'chunks':
+        current_chunk = status.get('current_chunk')
+        current_path = status['chunks'].get(current_chunk, {}).get('path') if current_chunk else None
+        status.update(get_file_diagnostics(current_path or CHUNK_DIR))
+        status['remaining'] = max(0, status['total_importable'] - status['processed'])
+        status['completed'] = status['status'] == 'completed'
+        status['upload_timestamp'] = status.get('uploaded_at')
+        status['progress_percent'] = int(status['processed'] / status['total_importable'] * 100) if status['total_importable'] else 0
+        return status
     file_path = get_recorded_file_path(status)
     status['data_file'] = str(file_path)
     status.update(get_file_diagnostics(file_path))
@@ -477,15 +567,103 @@ def process_batch(batch_size=BATCH_SIZE_DEFAULT):
     return progress
 
 
+def process_chunk_batch(stage_name, batch_size=BATCH_SIZE_DEFAULT):
+    if batch_size <= 0 or batch_size > MAX_BATCH_SIZE:
+        batch_size = BATCH_SIZE_DEFAULT
+    progress = load_progress()
+    if not progress or progress.get('mode') != 'chunks':
+        raise ImportErrorDetail('No chunk upload state exists.')
+    if stage_name not in dict(IMPORT_STAGES):
+        raise ImportErrorDetail(f'Unknown import stage: {stage_name}')
+    if progress['status'] == 'completed':
+        return progress
+    expected_stage = IMPORT_STAGES[progress['stage_index']][0] if progress['stage_index'] < len(IMPORT_STAGES) else None
+    if stage_name != expected_stage:
+        raise ImportErrorDetail(f'Expected stage {expected_stage!r}, received {stage_name!r}.')
+    if not progress['stage_complete'].get(stage_name):
+        raise ImportErrorDetail(f'Stage {stage_name} is not marked complete. Upload all chunks and mark the final chunk first.')
+
+    stage_chunks = sorted(
+        (name, record) for name, record in progress['chunks'].items() if record['stage'] == stage_name
+    )
+    while progress['current_chunk_index'] < len(stage_chunks):
+        chunk_name, chunk_record = stage_chunks[progress['current_chunk_index']]
+        file_path = Path(chunk_record['path']).resolve()
+        progress['current_chunk'] = chunk_name
+        diagnostics = get_file_diagnostics(file_path)
+        logger.info('Temporary chunk progress: path=%s exists=%s stage=%s chunk=%s batch=%s offset=%s processed=%s successful=%s skipped=%s failed=%s batch_size=%s', diagnostics['file_path'], diagnostics['file_exists'], stage_name, chunk_name, progress['batch_number'], progress['chunk_object_offset'], progress['processed'], progress['successful'], progress['skipped'], progress['failed'], batch_size)
+        if not file_path.is_file():
+            raise ImportErrorDetail('Uploaded chunk is missing on the current instance filesystem. ' + json.dumps(diagnostics))
+
+        batch = []
+        for index, entry in enumerate(stream_json_objects(file_path)):
+            if index < progress['chunk_object_offset']:
+                continue
+            if len(batch) >= batch_size:
+                break
+            batch.append(entry)
+
+        if not batch:
+            progress['current_chunk_index'] += 1
+            progress['chunk_object_offset'] = 0
+            progress['current_chunk'] = None
+            save_progress(progress)
+            continue
+
+        failed_objects = []
+        successful = 0
+        skipped = 0
+        with transaction.atomic():
+            for entry in batch:
+                try:
+                    result = import_single_entry(entry)
+                    skipped += result['skipped']
+                    successful += result['successful']
+                except Exception as exc:
+                    failed_objects.append({'model': entry.get('model'), 'pk': entry.get('pk'), 'error': str(exc)})
+                    break
+            if failed_objects:
+                raise ImportErrorDetail(json.dumps({'chunk': chunk_name, 'failed_objects': failed_objects}))
+
+        progress['status'] = 'processing'
+        progress['batch_number'] += 1
+        progress['successful'] += successful
+        progress['skipped'] += skipped
+        progress['processed'] += successful + skipped
+        progress['chunk_object_offset'] += len(batch)
+        progress['last_error'] = None
+        progress['failed_objects'] = []
+        save_progress(progress)
+        logger.info('Temporary chunk batch complete: stage=%s chunk=%s batch=%s processed=%s successful=%s skipped=%s failed=%s', stage_name, chunk_name, progress['batch_number'], progress['processed'], progress['successful'], progress['skipped'], progress['failed'])
+        return progress
+
+    progress['stage_index'] += 1
+    progress['stage_name'] = IMPORT_STAGES[progress['stage_index']][0] if progress['stage_index'] < len(IMPORT_STAGES) else None
+    progress['current_chunk_index'] = 0
+    progress['chunk_object_offset'] = 0
+    progress['current_chunk'] = None
+    if progress['stage_index'] >= len(IMPORT_STAGES):
+        progress['status'] = 'completed'
+        progress['completed_at'] = datetime.utcnow().isoformat() + 'Z'
+        create_completion_marker(progress)
+        reset_sequences()
+    save_progress(progress)
+    return progress
+
+
 def cleanup():
     progress = load_progress()
-    if progress and progress.get('status') == 'processing':
-        raise ImportErrorDetail('Cannot clean up while import is in progress.')
+    if not progress or progress.get('status') != 'completed':
+        raise ImportErrorDetail('Cleanup is allowed only after the complete import has finished.')
     removed = []
-    file_path = get_recorded_file_path(progress)
-    if file_path.exists():
-        file_path.unlink()
-        removed.append(str(file_path))
+    file_paths = [Path(item['path']) for item in progress.get('chunks', {}).values()]
+    file_paths.append(get_recorded_file_path(progress))
+    for file_path in set(file_paths):
+        if file_path.is_file():
+            file_path.unlink()
+            removed.append(str(file_path))
+    if CHUNK_DIR.is_dir() and not any(CHUNK_DIR.iterdir()):
+        CHUNK_DIR.rmdir()
     if PROGRESS_FILE.exists():
         PROGRESS_FILE.unlink()
         removed.append(str(PROGRESS_FILE))

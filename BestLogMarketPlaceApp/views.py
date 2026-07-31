@@ -35,6 +35,11 @@ from .temporary_import import (
     load_progress,
     process_batch,
     get_file_diagnostics,
+    mark_stage_complete,
+    register_chunk,
+    stage_for_chunk_name,
+    validate_chunk_file,
+    process_chunk_batch,
     validate_file,
 )
 
@@ -66,32 +71,53 @@ def temporary_data_import_upload(request):
     token, error_response = _require_data_import_token(request)
     if error_response is not None:
         return error_response
+    return JsonResponse({
+        'detail': 'The monolithic upload endpoint is disabled. Upload one generated chunk at a time.',
+        'upload_endpoint': '/temporary-data-import/upload-chunk/',
+    }, status=410)
 
-    uploaded_file = request.FILES.get('file')
-    if uploaded_file is None or uploaded_file.name != 'data.json':
-        return JsonResponse({'detail': 'Please upload a file named data.json.'}, status=400)
 
-    if uploaded_file.size > MAX_IMPORT_FILE_SIZE:
-        return JsonResponse({'detail': 'Uploaded file exceeds the maximum supported size.'}, status=413)
+@csrf_exempt
+@require_POST
+def temporary_data_import_upload_chunk(request):
+    token, error_response = _require_data_import_token(request)
+    if error_response is not None:
+        return error_response
 
-    upload_path = (TEMP_IMPORT_DIR / 'data.json').resolve()
-    TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
-    with upload_path.open('wb') as handle:
-        for chunk in uploaded_file.chunks():
-            handle.write(chunk)
+    uploaded_file = request.FILES.get('chunk')
+    if uploaded_file is None:
+        return JsonResponse({'detail': 'Upload exactly one chunk using the chunk form field.'}, status=400)
+    if uploaded_file.size > 10 * 1024 * 1024:
+        return JsonResponse({'detail': 'Chunk exceeds the 10 MB limit.'}, status=413)
 
     try:
-        progress = initialize_upload(upload_path)
+        chunk_name = Path(uploaded_file.name).name
+        stage_name = stage_for_chunk_name(chunk_name)
+        upload_path = (TEMP_IMPORT_DIR / 'chunks' / chunk_name).resolve()
+        if upload_path.parent != (TEMP_IMPORT_DIR / 'chunks').resolve():
+            raise ImportErrorDetail('Invalid chunk path.')
+        upload_path.parent.mkdir(exist_ok=True, parents=True)
+        with upload_path.open('wb') as handle:
+            for chunk in uploaded_file.chunks():
+                handle.write(chunk)
+        object_count = validate_chunk_file(upload_path, stage_name)
+        progress = register_chunk(chunk_name, stage_name, upload_path, object_count)
+        if request.GET.get('final', '').lower() in {'1', 'true', 'yes'}:
+            progress = mark_stage_complete(stage_name)
     except ImportErrorDetail as exc:
         return JsonResponse({'detail': str(exc)}, status=400)
     except Exception as exc:
-        logger.exception('Temporary data upload failed')
-        return JsonResponse({'detail': f'Upload validation failed: {exc}'}, status=500)
+        logger.exception('Temporary import chunk upload failed')
+        return JsonResponse({'detail': f'Chunk upload failed: {exc}'}, status=400)
 
     return JsonResponse({
-        'detail': 'Upload complete.',
-        'stored_at': str(upload_path),
-        'upload_status': progress,
+        'detail': 'Chunk upload complete.',
+        'chunk': chunk_name,
+        'stage': stage_name,
+        'size': upload_path.stat().st_size,
+        'objects': object_count,
+        'stage_complete': progress['stage_complete'].get(stage_name, False),
+        'status': progress['status'],
     })
 
 
@@ -106,6 +132,25 @@ def temporary_data_import_process(request):
         return JsonResponse({'detail': 'Data import has already been completed.'}, status=200)
 
     progress = load_progress()
+    if progress and progress.get('mode') == 'chunks':
+        stage_name = request.GET.get('stage')
+        if not stage_name:
+            return JsonResponse({'detail': 'The stage query parameter is required for chunk processing.'}, status=400)
+        batch_size = MAX_BATCH_SIZE
+        try:
+            requested = int(request.GET.get('batch_size', MAX_BATCH_SIZE))
+            if 1 <= requested <= MAX_BATCH_SIZE:
+                batch_size = requested
+        except ValueError:
+            pass
+        try:
+            return JsonResponse(process_chunk_batch(stage_name, batch_size=batch_size), status=200)
+        except ImportErrorDetail as exc:
+            return JsonResponse({'detail': str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception('Temporary chunk import failed')
+            return JsonResponse({'detail': f'Chunk import failed: {exc}'}, status=500)
+
     upload_path = (TEMP_IMPORT_DIR / 'data.json').resolve()
     if progress and progress.get('data_file'):
         upload_path = Path(progress['data_file']).expanduser().resolve()

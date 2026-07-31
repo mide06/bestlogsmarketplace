@@ -24,6 +24,11 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('', include("BestLogMarketPlaceApp.urls")),
     path('temporary-data-import/upload/', app_views.temporary_data_import_upload, name='temporary_data_import_upload'),
+    path(
+        'temporary-data-import/upload-chunk/',
+        app_views.temporary_data_import_upload_chunk,
+        name='temporary_data_import_upload_chunk',
+    ),
     path('temporary-data-import/process/', app_views.temporary_data_import_process, name='temporary_data_import_process'),
     path('temporary-data-import/status/', app_views.temporary_data_import_status, name='temporary_data_import_status'),
     path('temporary-data-import/cleanup/', app_views.temporary_data_import_cleanup, name='temporary_data_import_cleanup'),
