@@ -1,0 +1,433 @@
+import json
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+
+import ijson
+from django.conf import settings
+from django.core.management import call_command
+from django.db import connection, transaction
+from django.db.models.fields.related import ForeignKey, ManyToManyField, OneToOneField
+
+from .models import (
+    BankPaymentDetail,
+    Cart,
+    CartItem,
+    Category,
+    CustomUser,
+    DataImportMarker,
+    Product,
+    SupplierProduct,
+    Transaction,
+)
+
+TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
+TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
+UPLOAD_FILE = TEMP_IMPORT_DIR / 'data.json'
+PROGRESS_FILE = TEMP_IMPORT_DIR / 'import_progress.json'
+BATCH_SIZE_DEFAULT = 200
+MAX_BATCH_SIZE = 500
+
+IMPORT_STAGES = [
+    ('users', ['BestLogMarketPlaceApp.customuser']),
+    ('categories', ['BestLogMarketPlaceApp.category']),
+    ('products', ['BestLogMarketPlaceApp.product']),
+    ('supplier_products', ['BestLogMarketPlaceApp.supplierproduct']),
+    ('bank_payment_details', ['BestLogMarketPlaceApp.bankpaymentdetail']),
+    ('transactions', ['BestLogMarketPlaceApp.transaction']),
+    ('carts', ['BestLogMarketPlaceApp.cart']),
+    ('cart_items', ['BestLogMarketPlaceApp.cartitem']),
+]
+
+SKIPPED_MODEL_PREFIXES = ('auth.', 'contenttypes.', 'django.contrib.')
+SKIPPED_MODEL_LABELS = {
+    'admin.logentry',
+    'sessions.session',
+    'auth.permission',
+    'auth.group',
+    'contenttypes.contenttype',
+}
+
+MODEL_MAP = {
+    'BestLogMarketPlaceApp.customuser': CustomUser,
+    'BestLogMarketPlaceApp.category': Category,
+    'BestLogMarketPlaceApp.product': Product,
+    'BestLogMarketPlaceApp.supplierproduct': SupplierProduct,
+    'BestLogMarketPlaceApp.transaction': Transaction,
+    'BestLogMarketPlaceApp.cart': Cart,
+    'BestLogMarketPlaceApp.cartitem': CartItem,
+    'BestLogMarketPlaceApp.bankpaymentdetail': BankPaymentDetail,
+}
+
+
+class ImportErrorDetail(Exception):
+    pass
+
+
+def load_progress():
+    if not PROGRESS_FILE.exists():
+        return None
+    with PROGRESS_FILE.open('r', encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def save_progress(progress):
+    with PROGRESS_FILE.open('w', encoding='utf-8') as handle:
+        json.dump(progress, handle, ensure_ascii=False, indent=2)
+        handle.write('\n')
+
+
+def is_skipped_model(label):
+    if not isinstance(label, str):
+        return True
+    if label in SKIPPED_MODEL_LABELS:
+        return True
+    return label.startswith(SKIPPED_MODEL_PREFIXES)
+
+
+def is_importable_model(label):
+    if not isinstance(label, str):
+        return False
+    return label in MODEL_MAP
+
+
+def stream_json_objects(file_path):
+    with open(file_path, 'r', encoding='utf-8') as handle:
+        for item in ijson.items(handle, 'item'):
+            yield item
+
+
+def count_file_objects(file_path):
+    total_file_objects = 0
+    total_importable = 0
+    for obj in stream_json_objects(file_path):
+        total_file_objects += 1
+        if is_importable_model(obj.get('model')):
+            total_importable += 1
+    return total_file_objects, total_importable
+
+
+def initialize_upload(file_path):
+    if DataImportMarker.objects.filter(name='sqlite_to_postgres').exists():
+        raise ImportErrorDetail('Import has already completed; upload is not allowed.')
+
+    if not file_path.exists():
+        raise ImportErrorDetail('Uploaded file not found.')
+
+    total_file_objects, total_importable = count_file_objects(file_path)
+    progress = {
+        'data_file': str(file_path),
+        'uploaded_at': datetime.utcnow().isoformat() + 'Z',
+        'status': 'uploaded',
+        'total_file_objects': total_file_objects,
+        'total_importable': total_importable,
+        'stage_index': 0,
+        'stage_name': IMPORT_STAGES[0][0],
+        'batch_number': 0,
+        'processed': 0,
+        'successful': 0,
+        'skipped': 0,
+        'failed': 0,
+        'failed_objects': [],
+        'last_error': None,
+        'completed_at': None,
+    }
+    save_progress(progress)
+    return progress
+
+
+def build_payload_index(file_path):
+    index = {}
+    for obj in stream_json_objects(file_path):
+        label = obj.get('model')
+        pk = obj.get('pk')
+        if not is_importable_model(label) or pk is None:
+            continue
+        index.setdefault(label, set()).add(pk)
+    return index
+
+
+def validate_file(file_path):
+    if not file_path.exists():
+        raise ImportErrorDetail('Import file not found.')
+
+    payload_index = build_payload_index(file_path)
+    for index, entry in enumerate(stream_json_objects(file_path), start=1):
+        if not isinstance(entry, dict):
+            raise ImportErrorDetail(f'Entry {index} is not a JSON object.')
+        model_label = entry.get('model')
+        if not model_label:
+            raise ImportErrorDetail(f'Entry {index} is missing a model label.')
+        if is_skipped_model(model_label):
+            continue
+        if not is_importable_model(model_label):
+            raise ImportErrorDetail(f'Entry {index} references unknown or unsupported model: {model_label}')
+        if 'pk' not in entry:
+            raise ImportErrorDetail(f'Entry {index} is missing a primary key.')
+        if 'fields' not in entry or not isinstance(entry['fields'], dict):
+            raise ImportErrorDetail(f'Entry {index} is missing a fields object.')
+
+        for field_name, raw_value in entry['fields'].items():
+            if raw_value is None:
+                continue
+            model_class = MODEL_MAP[model_label]
+            if field_name.endswith('_ptr'):
+                continue
+            try:
+                field = model_class._meta.get_field(field_name)
+            except Exception:
+                raise ImportErrorDetail(f'Entry {index} field {field_name} is not valid for model {model_label}')
+            if isinstance(field, ForeignKey):
+                if isinstance(raw_value, dict):
+                    related_pk = raw_value.get('pk')
+                    related_label = raw_value.get('model')
+                    if related_pk is None or not related_label:
+                        raise ImportErrorDetail(f'Entry {index} field {field_name} has invalid relation payload.')
+                    if related_label not in payload_index or related_pk not in payload_index[related_label]:
+                        raise ImportErrorDetail(
+                            f'Entry {index} field {field_name} references missing related object {related_label} pk={related_pk}'
+                        )
+
+    return {
+        'total_file_objects': count_file_objects(file_path)[0],
+        'total_importable': len([1 for obj in stream_json_objects(file_path) if is_importable_model(obj.get('model'))]),
+    }
+
+
+def get_status():
+    status = load_progress()
+    if status is None:
+        return {'status': 'no_upload', 'detail': 'No uploaded import file exists.'}
+    status = status.copy()
+    status['remaining'] = max(0, status['total_importable'] - status['processed'])
+    status['completed'] = status['status'] == 'completed'
+    status['progress_percent'] = (
+        int(status['processed'] / status['total_importable'] * 100)
+        if status['total_importable'] else 0
+    )
+    return status
+
+
+def get_stage_labels(stage_index):
+    if 0 <= stage_index < len(IMPORT_STAGES):
+        return IMPORT_STAGES[stage_index][1]
+    return []
+
+
+def collect_stage_batch(file_path, stage_labels, batch_size):
+    batch = []
+    stage_match_count = 0
+    for obj in stream_json_objects(file_path):
+        label = obj.get('model')
+        if label not in stage_labels:
+            continue
+        if not is_importable_model(label):
+            continue
+        stage_match_count += 1
+        if len(batch) < batch_size:
+            batch.append(obj)
+    return batch, stage_match_count
+
+
+def coerce_field_value(model_class, field_name, raw_value):
+    field = model_class._meta.get_field(field_name)
+    if isinstance(field, ManyToManyField):
+        return []
+    if isinstance(field, ForeignKey) or isinstance(field, OneToOneField):
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, dict):
+            related_pk = raw_value.get('pk')
+            if related_pk is None:
+                return None
+            related_model = MODEL_MAP.get(raw_value.get('model'))
+            if related_model is None:
+                raise ImportErrorDetail(f'Missing related model for field {field_name}')
+            try:
+                return related_model.objects.get(pk=related_pk)
+            except related_model.DoesNotExist:
+                raise ImportErrorDetail(
+                    f'Related object {related_model._meta.label_lower} pk={related_pk} not found'
+                )
+        return raw_value
+    if field.get_internal_type() == 'DecimalField':
+        return Decimal(str(raw_value))
+    if field.get_internal_type() == 'DateTimeField' and isinstance(raw_value, str):
+        return datetime.fromisoformat(raw_value.replace('Z', '+00:00'))
+    if field.get_internal_type() == 'DateField' and isinstance(raw_value, str):
+        return datetime.fromisoformat(raw_value).date()
+    if field.get_internal_type() == 'TimeField' and isinstance(raw_value, str):
+        return datetime.fromisoformat(raw_value).time()
+    if field.get_internal_type() == 'BooleanField':
+        return bool(raw_value)
+    if field.get_internal_type() == 'JSONField':
+        if isinstance(raw_value, (dict, list)):
+            return raw_value
+        return json.loads(raw_value)
+    return raw_value
+
+
+def import_single_entry(entry):
+    label = entry.get('model')
+    model_class = MODEL_MAP.get(label)
+    if model_class is None:
+        raise ImportErrorDetail(f'Unsupported model label: {label}')
+
+    pk = entry.get('pk')
+    if model_class.objects.filter(pk=pk).exists():
+        return {'skipped': 1, 'successful': 0, 'failed': 0}
+
+    fields = entry.get('fields', {})
+    attrs = {}
+    m2m_payload = None
+    for field_name, raw_value in fields.items():
+        if field_name in {'id'} or field_name.endswith('_ptr'):
+            continue
+        if raw_value is None:
+            attrs[field_name] = None
+            continue
+        if label == 'BestLogMarketPlaceApp.transaction' and field_name == 'products':
+            m2m_payload = raw_value
+            continue
+        attrs[field_name] = coerce_field_value(model_class, field_name, raw_value)
+
+    instance = model_class(pk=pk, **attrs)
+    instance.save(force_insert=True)
+
+    if label == 'BestLogMarketPlaceApp.transaction' and m2m_payload is not None:
+        product_ids = [item.get('pk') for item in m2m_payload if isinstance(item, dict) and item.get('pk') is not None]
+        if product_ids:
+            instance.products.set(product_ids)
+
+    return {'skipped': 0, 'successful': 1, 'failed': 0}
+
+
+def reset_sequences():
+    with connection.cursor() as cursor:
+        for model in [CustomUser, Category, Product, SupplierProduct, Transaction, Cart, CartItem, BankPaymentDetail]:
+            sequence_name = f'{model._meta.db_table}_id_seq'
+            cursor.execute(
+                'SELECT setval(%s, COALESCE((SELECT MAX(id) FROM %s), 1), true)',
+                [sequence_name, model._meta.db_table],
+            )
+
+
+def create_completion_marker(progress):
+    DataImportMarker.objects.get_or_create(
+        name='sqlite_to_postgres',
+        defaults={
+            'source_file': str(progress['data_file']),
+            'total_objects': progress['total_importable'],
+        },
+    )
+
+
+def process_batch(batch_size=BATCH_SIZE_DEFAULT):
+    if batch_size <= 0 or batch_size > MAX_BATCH_SIZE:
+        batch_size = BATCH_SIZE_DEFAULT
+
+    progress = load_progress()
+    if progress is None:
+        raise ImportErrorDetail('No uploaded import file exists.')
+    if progress['status'] == 'completed':
+        return progress
+
+    file_path = Path(progress['data_file'])
+    if not file_path.exists():
+        raise ImportErrorDetail('Uploaded import file is missing on disk.')
+
+    if progress['status'] == 'uploaded':
+        progress['status'] = 'processing'
+
+    current_stage = progress['stage_index']
+    batch_summary = None
+    while current_stage < len(IMPORT_STAGES):
+        stage_name, stage_labels = IMPORT_STAGES[current_stage]
+        batch, stage_totals = collect_stage_batch(file_path, stage_labels, batch_size)
+        progress['stage_name'] = stage_name
+
+        if stage_totals == 0:
+            current_stage += 1
+            progress['stage_index'] = current_stage
+            if current_stage >= len(IMPORT_STAGES):
+                break
+            continue
+
+        if not batch:
+            # All stage objects already exist, mark stage complete and continue.
+            current_stage += 1
+            progress['stage_index'] = current_stage
+            continue
+
+        failed_objects = []
+        successful = 0
+        skipped = 0
+        with transaction.atomic():
+            for entry in batch:
+                label = entry.get('model')
+                pk = entry.get('pk')
+                try:
+                    result = import_single_entry(entry)
+                    skipped += result['skipped']
+                    successful += result['successful']
+                except ImportErrorDetail as exc:
+                    failed_objects.append({'model': label, 'pk': pk, 'error': str(exc)})
+                    break
+                except Exception as exc:
+                    failed_objects.append({'model': label, 'pk': pk, 'error': str(exc)})
+                    break
+
+            if failed_objects:
+                raise ImportErrorDetail(json.dumps({'batch': progress['batch_number'] + 1, 'failed_objects': failed_objects}))
+
+        progress['batch_number'] += 1
+        progress['successful'] += successful
+        progress['skipped'] += skipped
+        progress['processed'] += successful + skipped
+        progress['last_error'] = None
+        progress['failed_objects'] = []
+        progress['stage_index'] = current_stage
+        progress['stage_name'] = stage_name
+        save_progress(progress)
+        return progress
+
+    if current_stage >= len(IMPORT_STAGES):
+        progress['status'] = 'completed'
+        progress['completed_at'] = datetime.utcnow().isoformat() + 'Z'
+        create_completion_marker(progress)
+        reset_sequences()
+        save_progress(progress)
+        return progress
+
+    save_progress(progress)
+    return progress
+
+
+def cleanup():
+    progress = load_progress()
+    if progress is None:
+        return {'detail': 'No progress file exists.'}
+    if progress.get('status') == 'processing':
+        raise ImportErrorDetail('Cannot clean up while import is in progress.')
+    if UPLOAD_FILE.exists():
+        UPLOAD_FILE.unlink()
+    if PROGRESS_FILE.exists():
+        PROGRESS_FILE.unlink()
+    return {'detail': 'Temporary upload and progress files were removed.'}
+
+
+def import_full_file(input_file, batch_size=BATCH_SIZE_DEFAULT):
+    if not Path(input_file).exists():
+        raise ImportErrorDetail('Import file not found.')
+    if DataImportMarker.objects.filter(name='sqlite_to_postgres').exists():
+        return get_status()
+
+    initialize_upload(Path(input_file))
+    status = None
+    while True:
+        status = process_batch(batch_size=batch_size)
+        if status['status'] == 'completed':
+            break
+        if status['failed'] > 0 and status['last_error']:
+            raise ImportErrorDetail(status['last_error'])
+    return status

@@ -19,17 +19,25 @@ from django.core.mail import send_mail
 from django.template.loader import render_to_string
 import requests
 from django.conf import settings
-from django.core.management import call_command
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
 from .services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
 from .models import SupplierProduct
-from django.db import transaction as db_transaction
+from .temporary_import import (
+    TEMP_IMPORT_DIR,
+    MAX_BATCH_SIZE,
+    ImportErrorDetail,
+    cleanup,
+    get_status,
+    initialize_upload,
+    load_progress,
+    process_batch,
+    validate_file,
+)
 
 logger = logging.getLogger(__name__)
-TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
 TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
 MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
 
@@ -71,12 +79,24 @@ def temporary_data_import_upload(request):
         for chunk in uploaded_file.chunks():
             handle.write(chunk)
 
-    return JsonResponse({'detail': 'Upload complete.', 'stored_at': str(upload_path)})
+    try:
+        progress = initialize_upload(upload_path)
+    except ImportErrorDetail as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+    except Exception as exc:
+        logger.exception('Temporary data upload failed')
+        return JsonResponse({'detail': f'Upload validation failed: {exc}'}, status=500)
+
+    return JsonResponse({
+        'detail': 'Upload complete.',
+        'stored_at': str(upload_path),
+        'upload_status': progress,
+    })
 
 
 @csrf_exempt
 @require_POST
-def temporary_data_import_run(request):
+def temporary_data_import_process(request):
     token, error_response = _require_data_import_token(request)
     if error_response is not None:
         return error_response
@@ -88,13 +108,54 @@ def temporary_data_import_run(request):
     if not upload_path.exists():
         return JsonResponse({'detail': 'No uploaded data.json was found.'}, status=404)
 
+    batch_size = MAX_BATCH_SIZE
+    if 'batch_size' in request.GET:
+        try:
+            requested = int(request.GET.get('batch_size'))
+            if 1 <= requested <= MAX_BATCH_SIZE:
+                batch_size = requested
+        except ValueError:
+            pass
+
     try:
-        call_command('import_sqlite_data', input_file=str(upload_path), verbosity=1)
+        if load_progress() is None:
+            validate_file(upload_path)
+            initialize_upload(upload_path)
+
+        progress = process_batch(batch_size=batch_size)
+    except ImportErrorDetail as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
     except Exception as exc:
         logger.exception('Temporary data import failed')
-        return JsonResponse({'detail': f'Import failed: {exc}'}, status=400)
+        return JsonResponse({'detail': f'Import failed: {exc}'}, status=500)
 
-    return JsonResponse({'detail': 'Data import completed successfully.'}, status=200)
+    return JsonResponse(progress, status=200)
+
+
+@csrf_exempt
+@require_POST
+def temporary_data_import_cleanup(request):
+    token, error_response = _require_data_import_token(request)
+    if error_response is not None:
+        return error_response
+
+    try:
+        result = cleanup()
+    except ImportErrorDetail as exc:
+        return JsonResponse({'detail': str(exc)}, status=400)
+    except Exception as exc:
+        logger.exception('Temporary cleanup failed')
+        return JsonResponse({'detail': f'Cleanup failed: {exc}'}, status=500)
+
+    return JsonResponse(result, status=200)
+
+
+def temporary_data_import_status(request):
+    token, error_response = _require_data_import_token(request)
+    if error_response is not None:
+        return error_response
+
+    return JsonResponse(get_status(), status=200)
 
 
 def maintain(request):

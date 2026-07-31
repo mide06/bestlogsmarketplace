@@ -7,3 +7,4 @@ django-admin-sortable2>=2.3.1
 django-chartjs>=2.3.0
 requests>=2.32.0
 Pillow>=10.0,<13.0
+ijson>=3.2.0,<4.0
