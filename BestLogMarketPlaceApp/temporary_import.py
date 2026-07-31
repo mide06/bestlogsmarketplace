@@ -401,6 +401,45 @@ def coerce_field_value(model_class, field_name, raw_value):
     return raw_value
 
 
+def resolve_many_to_many_value(field, raw_value):
+    related_model = field.remote_field.model
+    manager = related_model._default_manager
+    if isinstance(raw_value, dict):
+        if raw_value.get('pk') is not None:
+            return manager.get(pk=raw_value['pk'])
+        natural_values = raw_value.get('natural_key', raw_value.get('fields'))
+        if natural_values is not None and hasattr(manager, 'get_by_natural_key'):
+            if not isinstance(natural_values, (list, tuple)):
+                natural_values = [natural_values]
+            return manager.get_by_natural_key(*natural_values)
+        raise ValueError(f'Unsupported relationship object: {raw_value!r}')
+    if isinstance(raw_value, (list, tuple)):
+        if hasattr(manager, 'get_by_natural_key'):
+            return manager.get_by_natural_key(*raw_value)
+        raise ValueError(f'Natural-key lookup is unavailable for {related_model._meta.label_lower}')
+    return manager.get(pk=raw_value)
+
+
+def apply_many_to_many_fields(instance, model_label, primary_key, m2m_payloads):
+    for field, raw_values in m2m_payloads.items():
+        values = [] if raw_values is None else raw_values
+        if not isinstance(values, (list, tuple)):
+            values = [values]
+        try:
+            related_objects = [resolve_many_to_many_value(field, value) for value in values]
+            getattr(instance, field.name).set(related_objects)
+        except Exception as exc:
+            raise ImportErrorDetail(
+                json.dumps({
+                    'model': model_label,
+                    'pk': primary_key,
+                    'field': field.name,
+                    'related_values': values,
+                    'error': str(exc),
+                }, default=str)
+            ) from exc
+
+
 def import_single_entry(entry):
     label = entry.get('model')
     model_class = MODEL_MAP.get(label)
@@ -408,32 +447,30 @@ def import_single_entry(entry):
         raise ImportErrorDetail(f'Unsupported model label: {label}')
 
     pk = entry.get('pk')
-    if model_class.objects.filter(pk=pk).exists():
-        return {'skipped': 1, 'successful': 0, 'failed': 0}
-
     fields = entry.get('fields', {})
     attrs = {}
-    m2m_payload = None
+    m2m_payloads = {}
     for field_name, raw_value in fields.items():
         if field_name in {'id'} or field_name.endswith('_ptr'):
+            continue
+        field = model_class._meta.get_field(field_name)
+        if isinstance(field, ManyToManyField):
+            m2m_payloads[field] = raw_value
             continue
         if raw_value is None:
             attrs[field_name] = None
             continue
-        if label == 'BestLogMarketPlaceApp.transaction' and field_name == 'products':
-            m2m_payload = raw_value
-            continue
         attrs[field_name] = coerce_field_value(model_class, field_name, raw_value)
 
-    instance = model_class(pk=pk, **attrs)
-    instance.save(force_insert=True)
+    instance = model_class.objects.filter(pk=pk).first()
+    skipped = instance is not None
+    if instance is None:
+        instance = model_class(pk=pk, **attrs)
+        instance.save(force_insert=True)
 
-    if label == 'BestLogMarketPlaceApp.transaction' and m2m_payload is not None:
-        product_ids = [item.get('pk') for item in m2m_payload if isinstance(item, dict) and item.get('pk') is not None]
-        if product_ids:
-            instance.products.set(product_ids)
+    apply_many_to_many_fields(instance, label, pk, m2m_payloads)
 
-    return {'skipped': 0, 'successful': 1, 'failed': 0}
+    return {'skipped': int(skipped), 'successful': int(not skipped), 'failed': 0}
 
 
 def reset_sequences():
