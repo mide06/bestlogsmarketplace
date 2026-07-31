@@ -34,11 +34,11 @@ from .temporary_import import (
     initialize_upload,
     load_progress,
     process_batch,
+    get_file_diagnostics,
     validate_file,
 )
 
 logger = logging.getLogger(__name__)
-TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
 MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
 
 
@@ -74,7 +74,8 @@ def temporary_data_import_upload(request):
     if uploaded_file.size > MAX_IMPORT_FILE_SIZE:
         return JsonResponse({'detail': 'Uploaded file exceeds the maximum supported size.'}, status=413)
 
-    upload_path = TEMP_IMPORT_DIR / 'data.json'
+    upload_path = (TEMP_IMPORT_DIR / 'data.json').resolve()
+    TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
     with upload_path.open('wb') as handle:
         for chunk in uploaded_file.chunks():
             handle.write(chunk)
@@ -104,9 +105,15 @@ def temporary_data_import_process(request):
     if DataImportMarker.objects.filter(name='sqlite_to_postgres').exists():
         return JsonResponse({'detail': 'Data import has already been completed.'}, status=200)
 
-    upload_path = TEMP_IMPORT_DIR / 'data.json'
-    if not upload_path.exists():
-        return JsonResponse({'detail': 'No uploaded data.json was found.'}, status=404)
+    progress = load_progress()
+    upload_path = (TEMP_IMPORT_DIR / 'data.json').resolve()
+    if progress and progress.get('data_file'):
+        upload_path = Path(progress['data_file']).expanduser().resolve()
+    if not upload_path.is_file():
+        return JsonResponse({
+            'detail': 'No uploaded data.json was found at the path recorded in import state.',
+            **get_file_diagnostics(upload_path),
+        }, status=404)
 
     batch_size = MAX_BATCH_SIZE
     if 'batch_size' in request.GET:
@@ -118,7 +125,7 @@ def temporary_data_import_process(request):
             pass
 
     try:
-        if load_progress() is None:
+        if progress is None:
             validate_file(upload_path)
             initialize_upload(upload_path)
 

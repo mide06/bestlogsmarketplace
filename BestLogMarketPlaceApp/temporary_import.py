@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -21,10 +23,10 @@ from .models import (
     Transaction,
 )
 
-TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
-TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
-UPLOAD_FILE = TEMP_IMPORT_DIR / 'data.json'
-PROGRESS_FILE = TEMP_IMPORT_DIR / 'import_progress.json'
+DEFAULT_TEMP_IMPORT_DIR = Path(settings.BASE_DIR) / '.tmp_imports'
+TEMP_IMPORT_DIR = Path(os.getenv('DATA_IMPORT_DIR', str(DEFAULT_TEMP_IMPORT_DIR))).expanduser().resolve()
+UPLOAD_FILE = (TEMP_IMPORT_DIR / 'data.json').resolve()
+PROGRESS_FILE = (TEMP_IMPORT_DIR / 'import_progress.json').resolve()
 BATCH_SIZE_DEFAULT = 200
 MAX_BATCH_SIZE = 500
 
@@ -59,9 +61,18 @@ MODEL_MAP = {
     'BestLogMarketPlaceApp.bankpaymentdetail': BankPaymentDetail,
 }
 
+logger = logging.getLogger(__name__)
+
 
 class ImportErrorDetail(Exception):
     pass
+
+
+def ensure_temp_import_dir():
+    TEMP_IMPORT_DIR.mkdir(exist_ok=True, parents=True)
+
+
+ensure_temp_import_dir()
 
 
 def load_progress():
@@ -72,9 +83,16 @@ def load_progress():
 
 
 def save_progress(progress):
+    ensure_temp_import_dir()
     with PROGRESS_FILE.open('w', encoding='utf-8') as handle:
         json.dump(progress, handle, ensure_ascii=False, indent=2)
         handle.write('\n')
+
+
+def get_recorded_file_path(progress=None):
+    if progress and progress.get('data_file'):
+        return Path(progress['data_file']).expanduser().resolve()
+    return UPLOAD_FILE
 
 
 def is_skipped_model(label):
@@ -114,9 +132,10 @@ def initialize_upload(file_path):
     if not file_path.exists():
         raise ImportErrorDetail('Uploaded file not found.')
 
+    file_path = Path(file_path).resolve()
     total_file_objects, total_importable = count_file_objects(file_path)
     progress = {
-        'data_file': str(file_path),
+        'data_file': str(UPLOAD_FILE),
         'uploaded_at': datetime.utcnow().isoformat() + 'Z',
         'status': 'uploaded',
         'total_file_objects': total_file_objects,
@@ -194,11 +213,36 @@ def validate_file(file_path):
     }
 
 
+def get_file_diagnostics(file_path=None):
+    ensure_temp_import_dir()
+    file_path = Path(file_path or UPLOAD_FILE).resolve()
+    file_exists = file_path.is_file()
+    return {
+        'file_exists': file_exists,
+        'file_path': str(file_path),
+        'file_size': file_path.stat().st_size if file_exists else 0,
+    }
+
+
 def get_status():
     status = load_progress()
     if status is None:
-        return {'status': 'no_upload', 'detail': 'No uploaded import file exists.'}
+        return {
+            'status': 'no_upload',
+            'detail': 'No uploaded import file exists in the current instance filesystem.',
+            **get_file_diagnostics(),
+            'upload_timestamp': None,
+            'stage_name': None,
+            'processed': 0,
+            'successful': 0,
+            'skipped': 0,
+            'failed': 0,
+        }
     status = status.copy()
+    file_path = get_recorded_file_path(status)
+    status['data_file'] = str(file_path)
+    status.update(get_file_diagnostics(file_path))
+    status['upload_timestamp'] = status.get('uploaded_at')
     status['remaining'] = max(0, status['total_importable'] - status['processed'])
     status['completed'] = status['status'] == 'completed'
     status['progress_percent'] = (
@@ -303,6 +347,8 @@ def import_single_entry(entry):
 
 
 def reset_sequences():
+    if connection.vendor != 'postgresql':
+        return
     with connection.cursor() as cursor:
         for model in [CustomUser, Category, Product, SupplierProduct, Transaction, Cart, CartItem, BankPaymentDetail]:
             sequence_name = f'{model._meta.db_table}_id_seq'
@@ -332,9 +378,26 @@ def process_batch(batch_size=BATCH_SIZE_DEFAULT):
     if progress['status'] == 'completed':
         return progress
 
-    file_path = Path(progress['data_file'])
-    if not file_path.exists():
-        raise ImportErrorDetail('Uploaded import file is missing on disk.')
+    file_path = get_recorded_file_path(progress)
+    diagnostics = get_file_diagnostics(file_path)
+    logger.info(
+        'Temporary import progress: data_file=%s file_exists=%s stage=%s batch=%s '
+        'processed=%s successful=%s skipped=%s failed=%s batch_size=%s',
+        diagnostics['file_path'],
+        diagnostics['file_exists'],
+        progress.get('stage_name'),
+        progress.get('batch_number'),
+        progress.get('processed'),
+        progress.get('successful'),
+        progress.get('skipped'),
+        progress.get('failed'),
+        batch_size,
+    )
+    if not file_path.is_file():
+        raise ImportErrorDetail(
+            'Uploaded import file is missing on the current instance filesystem. '
+            + json.dumps(diagnostics)
+        )
 
     if progress['status'] == 'uploaded':
         progress['status'] = 'processing'
@@ -389,6 +452,17 @@ def process_batch(batch_size=BATCH_SIZE_DEFAULT):
         progress['stage_index'] = current_stage
         progress['stage_name'] = stage_name
         save_progress(progress)
+        logger.info(
+            'Temporary import batch complete: data_file=%s stage=%s batch=%s '
+            'processed=%s successful=%s skipped=%s failed=%s',
+            str(file_path),
+            stage_name,
+            progress['batch_number'],
+            progress['processed'],
+            progress['successful'],
+            progress['skipped'],
+            progress['failed'],
+        )
         return progress
 
     if current_stage >= len(IMPORT_STAGES):
@@ -405,15 +479,21 @@ def process_batch(batch_size=BATCH_SIZE_DEFAULT):
 
 def cleanup():
     progress = load_progress()
-    if progress is None:
-        return {'detail': 'No progress file exists.'}
-    if progress.get('status') == 'processing':
+    if progress and progress.get('status') == 'processing':
         raise ImportErrorDetail('Cannot clean up while import is in progress.')
-    if UPLOAD_FILE.exists():
-        UPLOAD_FILE.unlink()
+    removed = []
+    file_path = get_recorded_file_path(progress)
+    if file_path.exists():
+        file_path.unlink()
+        removed.append(str(file_path))
     if PROGRESS_FILE.exists():
         PROGRESS_FILE.unlink()
-    return {'detail': 'Temporary upload and progress files were removed.'}
+        removed.append(str(PROGRESS_FILE))
+    return {
+        'detail': 'Temporary upload and progress files were removed.',
+        'removed': removed,
+        **get_file_diagnostics(),
+    }
 
 
 def import_full_file(input_file, batch_size=BATCH_SIZE_DEFAULT):
