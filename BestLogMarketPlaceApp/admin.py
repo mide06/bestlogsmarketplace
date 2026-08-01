@@ -1,11 +1,19 @@
 # admin.py
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.decorators import user_passes_test
+from django.shortcuts import redirect
+from django.urls import path, reverse
 from django.utils.html import format_html
-from django.urls import reverse
-from .models import CustomUser, Category, Product, Transaction,BankPaymentDetail,Cart,CartItem
-from .services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
+
+from .models import CustomUser, Category, Product, Transaction, BankPaymentDetail, Cart, CartItem
 from .models import SupplierProduct
+from .services.supplier_sync import sync_emonbestlogs_products
+from .services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
+
+
+def _superuser_required(view_func):
+    return user_passes_test(lambda u: u.is_active and u.is_superuser)(view_func)
 
 
 class CustomUserAdmin(UserAdmin):
@@ -24,6 +32,42 @@ class CategoryAdmin(admin.ModelAdmin):
     ordering = ('order',)              # Sort the categories by the 'order' field in the admin
     fields = ('name', 'slug', 'supplier_category_id', 'description', 'image', 'order')
     readonly_fields = ('slug', 'supplier_category_id')
+
+
+class SupplierSyncMixin:
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                'sync-emonbestlogs-products/',
+                self.admin_site.admin_view(self.sync_emonbestlogs_products_view),
+                name='sync_emonbestlogs_products',
+            )
+        ]
+        return custom_urls + urls
+
+    def sync_emonbestlogs_products_view(self, request):
+        if not request.user.is_active or not request.user.is_superuser:
+            self.message_user(request, 'You do not have permission to run this sync.', level=messages.ERROR)
+            return redirect('admin:index')
+
+        try:
+            result = sync_emonbestlogs_products()
+            self.message_user(
+                request,
+                (
+                    f"Synced EmonBestLogs products: categories_created={result['categories_created']}, "
+                    f"categories_updated={result['categories_updated']}, products_created={result['products_created']}, "
+                    f"products_updated={result['products_updated']}, supplier_products_created={result['supplier_products_created']}, "
+                    f"supplier_products_updated={result['supplier_products_updated']}, failed={result['failed']}"
+                ),
+                level=messages.SUCCESS,
+            )
+        except Exception as exc:
+            self.message_user(request, f"Sync failed: {exc}", level=messages.ERROR)
+
+        return redirect('admin:BestLogMarketPlaceApp_supplierproduct_changelist')
+
 
 class ProductAdmin(admin.ModelAdmin):
     list_display = ("name", "price", "supplier_price", "supplier_stock", "category", "is_purchased", "view_link")
@@ -110,9 +154,17 @@ admin.site.register(Category, CategoryAdmin)
 admin.site.register(Product, ProductAdmin)
 
 
-class SupplierProductAdmin(admin.ModelAdmin):
+class SupplierProductAdmin(SupplierSyncMixin, admin.ModelAdmin):
     list_display = ("supplier_product_id", "supplier_name", "supplier_price", "supplier_stock", "product")
     search_fields = ("supplier_product_id", "supplier_name")
+
+    change_list_template = "admin/bestlogmarketplaceapp/supplierproduct/change_list.html"
+
+    def changelist_view(self, request, extra_context=None):
+        if extra_context is None:
+            extra_context = {}
+        extra_context["sync_emonbestlogs_url"] = reverse("admin:bestlogmarketplaceapp_supplierproduct_sync_emonbestlogs_products")
+        return super().changelist_view(request, extra_context=extra_context)
 
 
 admin.site.register(SupplierProduct, SupplierProductAdmin)
