@@ -41,7 +41,7 @@ class SupplierSyncMixin:
             path(
                 'sync-emonbestlogs-products/',
                 self.admin_site.admin_view(self.sync_emonbestlogs_products_view),
-                name='sync_emonbestlogs_products',
+                name=self.urlname('sync_emonbestlogs_products'),
             )
         ]
         return custom_urls + urls
@@ -163,7 +163,9 @@ class SupplierProductAdmin(SupplierSyncMixin, admin.ModelAdmin):
     def changelist_view(self, request, extra_context=None):
         if extra_context is None:
             extra_context = {}
-        extra_context["sync_emonbestlogs_url"] = reverse("admin:bestlogmarketplaceapp_supplierproduct_sync_emonbestlogs_products")
+        extra_context["sync_emonbestlogs_url"] = reverse(
+            f"admin:{self.urlname('sync_emonbestlogs_products')}"
+        )
         return super().changelist_view(request, extra_context=extra_context)
 
 
