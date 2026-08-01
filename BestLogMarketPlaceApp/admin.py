@@ -35,13 +35,16 @@ class CategoryAdmin(admin.ModelAdmin):
 
 
 class SupplierSyncMixin:
+    def get_sync_url_name(self):
+        return f"{self.opts.app_label}_{self.opts.model_name}_sync_emonbestlogs_products"
+
     def get_urls(self):
         urls = super().get_urls()
         custom_urls = [
             path(
                 'sync-emonbestlogs-products/',
                 self.admin_site.admin_view(self.sync_emonbestlogs_products_view),
-                name=self.urlname('sync_emonbestlogs_products'),
+                name=self.get_sync_url_name(),
             )
         ]
         return custom_urls + urls
@@ -66,7 +69,8 @@ class SupplierSyncMixin:
         except Exception as exc:
             self.message_user(request, f"Sync failed: {exc}", level=messages.ERROR)
 
-        return redirect('admin:BestLogMarketPlaceApp_supplierproduct_changelist')
+        changelist_url = reverse(f"admin:{self.opts.app_label}_{self.opts.model_name}_changelist")
+        return redirect(changelist_url)
 
 
 class ProductAdmin(admin.ModelAdmin):
@@ -164,7 +168,7 @@ class SupplierProductAdmin(SupplierSyncMixin, admin.ModelAdmin):
         if extra_context is None:
             extra_context = {}
         extra_context["sync_emonbestlogs_url"] = reverse(
-            f"admin:{self.urlname('sync_emonbestlogs_products')}"
+            f"admin:{self.get_sync_url_name()}"
         )
         return super().changelist_view(request, extra_context=extra_context)
 

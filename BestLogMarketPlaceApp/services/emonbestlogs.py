@@ -94,7 +94,11 @@ class EmonBestLogsService:
         raise EmonBestLogsAPIError(message or f"Unexpected supplier response status: {status_code}")
 
     def get_categories(self):
-        return self._request("GET", "/categories")
+        data = self._request("GET", "/categories")
+        print("\n========== EMON CATEGORY RESPONSE ==========")
+        print(data)
+        print("===========================================\n")
+        return data
 
     def get_products(self, category=None, in_stock=None, page=None):
         params = {}
@@ -104,7 +108,12 @@ class EmonBestLogsService:
             params["in_stock"] = in_stock
         if page:
             params["page"] = page
-        return self._request("GET", "/products", params=params)
+
+        data = self._request("GET", "/products", params=params)
+        print("\n========== EMON PRODUCT RESPONSE ==========")
+        print(data)
+        print("==========================================\n")
+        return data
 
     def buy_product(self, product_id, quantity=1, idempotency_key=None):
         payload = {"product": product_id, "quantity": quantity}

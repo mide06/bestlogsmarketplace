@@ -1,3 +1,4 @@
+import traceback
 from decimal import Decimal
 
 from django.utils import timezone
@@ -39,7 +40,38 @@ def _build_category_slug(base):
     return slug
 
 
+def _extract_payload_list(payload, keys, payload_name):
+    if isinstance(payload, list):
+        print(f"\n========== EMON {payload_name.upper()} PAYLOAD IS LIST ==========")
+        print(f"Payload length: {len(payload)}")
+        print(payload)
+        print("===============================================\n")
+        return payload
+
+    if not isinstance(payload, dict):
+        print(f"\n========== EMON {payload_name.upper()} PAYLOAD UNEXPECTED TYPE ==========")
+        print(type(payload))
+        print(payload)
+        print("===============================================\n")
+        return []
+
+    for key in keys:
+        if key in payload and isinstance(payload[key], list):
+            print(f"\n========== EMON {payload_name.upper()} PAYLOAD KEY '{key}' ==========")
+            print(f"Payload length: {len(payload[key])}")
+            print(payload[key])
+            print("===============================================\n")
+            return payload[key]
+
+    print(f"\n========== EMON {payload_name.upper()} PAYLOAD KEYS NOT MATCHED ==========")
+    print("Payload keys:", list(payload.keys()))
+    print(payload)
+    print("===============================================\n")
+    return []
+
+
 def sync_emonbestlogs_products():
+    print("\n========== STARTING EMONBESTLOGS SYNC ==========")
     result = {
         "categories_created": 0,
         "categories_updated": 0,
@@ -52,7 +84,8 @@ def sync_emonbestlogs_products():
 
     service = EmonBestLogsService()
     categories_payload = service.get_categories()
-    supplier_categories = categories_payload.get("results") if isinstance(categories_payload, dict) else categories_payload
+    supplier_categories = _extract_payload_list(categories_payload, ["results", "data", "categories"], "categories")
+    print(f"Categories payload count: {len(supplier_categories) if supplier_categories is not None else 0}")
 
     category_map = {}
     if isinstance(supplier_categories, list):
@@ -97,10 +130,13 @@ def sync_emonbestlogs_products():
                 category_map[supplier_category_id] = category
 
     payload = service.get_products()
-    products = payload.get("results") if isinstance(payload, dict) else payload
+    products = _extract_payload_list(payload, ["results", "data", "products"], "products")
+    print(f"Products payload count: {len(products) if products is not None else 0}")
 
     if not isinstance(products, list):
-        raise EmonBestLogsAPIError("Unexpected response format returned by EmonBestLogs.")
+        raise EmonBestLogsAPIError(
+            f"Unexpected response format returned by EmonBestLogs. payload keys={list(payload.keys()) if isinstance(payload, dict) else type(payload)}"
+        )
 
     default_category, _ = Category.objects.get_or_create(name="General", defaults={"slug": "general"})
 
@@ -181,8 +217,30 @@ def sync_emonbestlogs_products():
             else:
                 result["supplier_products_updated"] += 1
 
-        except Exception:
+        except Exception as e:
             result["failed"] += 1
+
+            print("=" * 80)
+            print("FAILED TO IMPORT PRODUCT")
+            print("Product payload:")
+            print(item)
+            print("Exception:")
+            print(repr(e))
+            traceback.print_exc()
+            print("=" * 80)
+
             continue
+
+    print("\n========== EMONBESTLOGS SYNC SUMMARY ==========")
+    print(f"Categories returned: {len(supplier_categories) if isinstance(supplier_categories, list) else 0}")
+    print(f"Products returned: {len(products) if isinstance(products, list) else 0}")
+    print(f"Categories created: {result['categories_created']}")
+    print(f"Categories updated: {result['categories_updated']}")
+    print(f"Products created: {result['products_created']}")
+    print(f"Products updated: {result['products_updated']}")
+    print(f"SupplierProducts created: {result['supplier_products_created']}")
+    print(f"SupplierProducts updated: {result['supplier_products_updated']}")
+    print(f"Failed items: {result['failed']}")
+    print("===============================================\n")
 
     return result
