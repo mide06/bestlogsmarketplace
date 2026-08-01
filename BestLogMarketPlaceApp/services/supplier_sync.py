@@ -1,4 +1,6 @@
 import traceback
+import logging
+import traceback
 from decimal import Decimal
 
 from django.utils import timezone
@@ -6,6 +8,8 @@ from django.utils.text import slugify
 
 from BestLogMarketPlaceApp.models import Category, Product, SupplierProduct
 from BestLogMarketPlaceApp.services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_stock(item):
@@ -42,36 +46,28 @@ def _build_category_slug(base):
 
 def _extract_payload_list(payload, keys, payload_name):
     if isinstance(payload, list):
-        print(f"\n========== EMON {payload_name.upper()} PAYLOAD IS LIST ==========")
-        print(f"Payload length: {len(payload)}")
-        print(payload)
-        print("===============================================\n")
+        logger.info("EmonBestLogs %s payload is a list. length=%s", payload_name, len(payload))
+        logger.info("EmonBestLogs %s payload raw: %s", payload_name, payload)
         return payload
 
     if not isinstance(payload, dict):
-        print(f"\n========== EMON {payload_name.upper()} PAYLOAD UNEXPECTED TYPE ==========")
-        print(type(payload))
-        print(payload)
-        print("===============================================\n")
+        logger.error("EmonBestLogs %s payload unexpected type: %s", payload_name, type(payload))
+        logger.error("EmonBestLogs %s payload raw: %s", payload_name, payload)
         return []
 
     for key in keys:
         if key in payload and isinstance(payload[key], list):
-            print(f"\n========== EMON {payload_name.upper()} PAYLOAD KEY '{key}' ==========")
-            print(f"Payload length: {len(payload[key])}")
-            print(payload[key])
-            print("===============================================\n")
+            logger.info("EmonBestLogs %s payload key '%s' found. length=%s", payload_name, key, len(payload[key]))
+            logger.info("EmonBestLogs %s payload raw: %s", payload_name, payload[key])
             return payload[key]
 
-    print(f"\n========== EMON {payload_name.upper()} PAYLOAD KEYS NOT MATCHED ==========")
-    print("Payload keys:", list(payload.keys()))
-    print(payload)
-    print("===============================================\n")
+    logger.warning("EmonBestLogs %s payload keys not matched. available keys=%s", payload_name, list(payload.keys()))
+    logger.warning("EmonBestLogs %s payload raw: %s", payload_name, payload)
     return []
 
 
 def sync_emonbestlogs_products():
-    print("\n========== STARTING EMONBESTLOGS SYNC ==========")
+    logger.info("Starting supplier sync...")
     result = {
         "categories_created": 0,
         "categories_updated": 0,
@@ -80,12 +76,15 @@ def sync_emonbestlogs_products():
         "supplier_products_created": 0,
         "supplier_products_updated": 0,
         "failed": 0,
+        "categories_received": 0,
+        "products_received": 0,
     }
 
     service = EmonBestLogsService()
     categories_payload = service.get_categories()
     supplier_categories = _extract_payload_list(categories_payload, ["results", "data", "categories"], "categories")
-    print(f"Categories payload count: {len(supplier_categories) if supplier_categories is not None else 0}")
+    result["categories_received"] = len(supplier_categories) if isinstance(supplier_categories, list) else 0
+    logger.info("Number of categories received: %s", result["categories_received"])
 
     category_map = {}
     if isinstance(supplier_categories, list):
@@ -131,7 +130,8 @@ def sync_emonbestlogs_products():
 
     payload = service.get_products()
     products = _extract_payload_list(payload, ["results", "data", "products"], "products")
-    print(f"Products payload count: {len(products) if products is not None else 0}")
+    result["products_received"] = len(products) if isinstance(products, list) else 0
+    logger.info("Number of products received: %s", result["products_received"])
 
     if not isinstance(products, list):
         raise EmonBestLogsAPIError(
@@ -144,6 +144,8 @@ def sync_emonbestlogs_products():
         try:
             supplier_product_id = item.get("id") or item.get("product_id")
             if not supplier_product_id:
+                logger.warning("Skipping product because supplier_product_id is missing. payload=%s", item)
+                result["failed"] += 1
                 continue
 
             supplier_product_id = str(supplier_product_id)
@@ -151,6 +153,26 @@ def sync_emonbestlogs_products():
             category = category_map.get(supplier_category_id) if supplier_category_id else None
             if not category and supplier_category_id:
                 category = Category.objects.filter(supplier_category_id=supplier_category_id).first()
+
+            product_name = item.get("name") or item.get("product_name") or None
+            if not product_name:
+                logger.warning("Skipping product because name is missing. supplier_product_id=%s payload=%s", supplier_product_id, item)
+                result["failed"] += 1
+                continue
+
+            logger.info(
+                "Processing supplier product: supplier_id=%s name=%s category=%s stock=%s price=%s",
+                supplier_product_id,
+                product_name,
+                supplier_category_id or "(none)",
+                _parse_stock(item),
+                item.get("supplier_price") or item.get("price"),
+            )
+
+            if not category:
+                category_name = item.get("category") or item.get("category_name")
+                if category_name:
+                    category = Category.objects.filter(name__iexact=category_name).first()
 
             if not category:
                 category_name = item.get("category") or item.get("category_name")
@@ -219,28 +241,19 @@ def sync_emonbestlogs_products():
 
         except Exception as e:
             result["failed"] += 1
-
-            print("=" * 80)
-            print("FAILED TO IMPORT PRODUCT")
-            print("Product payload:")
-            print(item)
-            print("Exception:")
-            print(repr(e))
-            traceback.print_exc()
-            print("=" * 80)
-
+            logger.exception("Failed to import product supplier_id=%s payload=%s", supplier_product_id if 'supplier_product_id' in locals() else None, item)
             continue
 
-    print("\n========== EMONBESTLOGS SYNC SUMMARY ==========")
-    print(f"Categories returned: {len(supplier_categories) if isinstance(supplier_categories, list) else 0}")
-    print(f"Products returned: {len(products) if isinstance(products, list) else 0}")
-    print(f"Categories created: {result['categories_created']}")
-    print(f"Categories updated: {result['categories_updated']}")
-    print(f"Products created: {result['products_created']}")
-    print(f"Products updated: {result['products_updated']}")
-    print(f"SupplierProducts created: {result['supplier_products_created']}")
-    print(f"SupplierProducts updated: {result['supplier_products_updated']}")
-    print(f"Failed items: {result['failed']}")
-    print("===============================================\n")
+    logger.info("EmonBestLogs sync summary: categories_returned=%s products_returned=%s categories_created=%s categories_updated=%s products_created=%s products_updated=%s supplier_products_created=%s supplier_products_updated=%s failed=%s",
+        len(supplier_categories) if isinstance(supplier_categories, list) else 0,
+        len(products) if isinstance(products, list) else 0,
+        result['categories_created'],
+        result['categories_updated'],
+        result['products_created'],
+        result['products_updated'],
+        result['supplier_products_created'],
+        result['supplier_products_updated'],
+        result['failed'],
+    )
 
     return result

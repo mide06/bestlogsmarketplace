@@ -1,4 +1,6 @@
 # admin.py
+import logging
+
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.decorators import user_passes_test
@@ -10,6 +12,8 @@ from .models import CustomUser, Category, Product, Transaction, BankPaymentDetai
 from .models import SupplierProduct
 from .services.supplier_sync import sync_emonbestlogs_products
 from .services.emonbestlogs import EmonBestLogsAPIError, EmonBestLogsService
+
+logger = logging.getLogger(__name__)
 
 
 def _superuser_required(view_func):
@@ -55,11 +59,15 @@ class SupplierSyncMixin:
             return redirect('admin:index')
 
         try:
+            self.message_user(request, "Syncing EmonBestLogs products...", level=messages.INFO)
             result = sync_emonbestlogs_products()
+            self.message_user(request, "EmonBestLogs API connected and response received.", level=messages.INFO)
+            self.message_user(request, f"Categories received: {result['categories_received']}", level=messages.INFO)
+            self.message_user(request, f"Products received: {result['products_received']}", level=messages.INFO)
             self.message_user(
                 request,
                 (
-                    f"Synced EmonBestLogs products: categories_created={result['categories_created']}, "
+                    f"Sync complete: categories_created={result['categories_created']}, "
                     f"categories_updated={result['categories_updated']}, products_created={result['products_created']}, "
                     f"products_updated={result['products_updated']}, supplier_products_created={result['supplier_products_created']}, "
                     f"supplier_products_updated={result['supplier_products_updated']}, failed={result['failed']}"
@@ -67,6 +75,7 @@ class SupplierSyncMixin:
                 level=messages.SUCCESS,
             )
         except Exception as exc:
+            logger.exception("Sync failed in admin sync view.")
             self.message_user(request, f"Sync failed: {exc}", level=messages.ERROR)
 
         changelist_url = reverse(f"admin:{self.opts.app_label}_{self.opts.model_name}_changelist")

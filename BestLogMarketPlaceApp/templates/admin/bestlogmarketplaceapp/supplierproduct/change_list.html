@@ -3,12 +3,8 @@
 {% block object-tools %}
   {{ block.super }}
   {% if has_change_permission %}
-    <div class="object-tools">
-      <ul class="object-tools">
-        <li>
-          <a href="{{ sync_emonbestlogs_url }}" class="addlink">Sync EmonBestLogs Products</a>
-        </li>
-      </ul>
-    </div>
+    <li>
+      <a href="{{ sync_emonbestlogs_url }}" class="addlink">Sync EmonBestLogs Products</a>
+    </li>
   {% endif %}
 {% endblock %}

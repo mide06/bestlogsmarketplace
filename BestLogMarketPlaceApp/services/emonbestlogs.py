@@ -50,14 +50,17 @@ class EmonBestLogsService:
     def _request(self, method, path, **kwargs):
         url = self._build_url(path)
         timeout = kwargs.pop("timeout", 10)
+        logger.info("EmonBestLogs request: method=%s url=%s params=%s json=%s", method.upper(), url, kwargs.get("params"), kwargs.get("json"))
         try:
             response = self.session.request(method=method.upper(), url=url, timeout=timeout, **kwargs)
+            logger.info("EmonBestLogs response status: %s for %s", response.status_code, url)
             response.raise_for_status()
             try:
                 payload = response.json()
             except ValueError:
                 payload = {"raw": response.text}
 
+            logger.info("EmonBestLogs response JSON for %s: %s", url, payload)
             if isinstance(payload, dict) and payload.get("error"):
                 logger.error("EmonBestLogs API error for %s: %s", path, payload)
                 raise EmonBestLogsAPIError(payload.get("message") or payload.get("error"))
@@ -95,9 +98,7 @@ class EmonBestLogsService:
 
     def get_categories(self):
         data = self._request("GET", "/categories")
-        print("\n========== EMON CATEGORY RESPONSE ==========")
-        print(data)
-        print("===========================================\n")
+        logger.info("EmonBestLogs /categories response payload: %s", data)
         return data
 
     def get_products(self, category=None, in_stock=None, page=None):
@@ -110,9 +111,7 @@ class EmonBestLogsService:
             params["page"] = page
 
         data = self._request("GET", "/products", params=params)
-        print("\n========== EMON PRODUCT RESPONSE ==========")
-        print(data)
-        print("==========================================\n")
+        logger.info("EmonBestLogs /products response payload: %s", data)
         return data
 
     def buy_product(self, product_id, quantity=1, idempotency_key=None):
